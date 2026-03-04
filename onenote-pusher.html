@@ -87,13 +87,16 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .hidden { display: none !important; }
     footer { margin-top: 32px; color: var(--muted); font-size: 0.7rem; text-align: center; letter-spacing: 0.05em; }
+
+    /* Hidden iframe for rendering HTML */
+    #render-frame { position: fixed; left: -9999px; top: 0; width: 1200px; height: 1px; border: none; visibility: hidden; }
   </style>
 </head>
 <body>
 
 <header>
   <h1>OneNote Pusher</h1>
-  <p>Push HTML files directly into OneNote</p>
+  <p>Push HTML files directly into OneNote as images</p>
 </header>
 
 <div class="card" id="signin-card">
@@ -142,11 +145,12 @@
   <div class="status" id="status"></div>
 </div>
 
+<iframe id="render-frame"></iframe>
 <footer>Uses Microsoft Graph API · Your credentials never leave your browser</footer>
 
 <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
-  // Wait for MSAL to be ready
   const msalConfig = {
     auth: {
       clientId: "90e9effa-bec9-4888-a534-a293e5cd0513",
@@ -162,7 +166,6 @@
   let accessToken = null;
   let selectedFile = null;
 
-  // Wire up all event listeners via addEventListener (no onclick in HTML)
   document.getElementById('signin-btn').addEventListener('click', signIn);
   document.getElementById('signout-btn').addEventListener('click', signOut);
   document.getElementById('push-btn').addEventListener('click', pushToOneNote);
@@ -285,29 +288,119 @@
     document.getElementById('push-btn').disabled = !(selectedFile && sectionId);
   }
 
+  async function renderHtmlToImage(htmlContent) {
+    return new Promise((resolve, reject) => {
+      const iframe = document.getElementById('render-frame');
+
+      // Write HTML into iframe
+      iframe.style.visibility = 'hidden';
+      iframe.style.width = '1200px';
+      iframe.contentDocument.open();
+      iframe.contentDocument.write(htmlContent);
+      iframe.contentDocument.close();
+
+      // Wait for content to load then capture
+      iframe.onload = async () => {
+        try {
+          // Set iframe height to full content height — no page breaks
+          const body = iframe.contentDocument.body;
+          const fullHeight = Math.max(body.scrollHeight, body.offsetHeight);
+          iframe.style.height = fullHeight + 'px';
+
+          const canvas = await html2canvas(iframe.contentDocument.body, {
+            width: 1200,
+            height: fullHeight,
+            scale: 1.5, // higher res for crisp pen markup
+            useCORS: true,
+            allowTaint: true,
+            backgroundColor: '#ffffff',
+            windowWidth: 1200,
+            windowHeight: fullHeight
+          });
+
+          canvas.toBlob(blob => resolve(blob), 'image/png', 0.95);
+        } catch (err) {
+          reject(err);
+        }
+      };
+    });
+  }
+
   async function pushToOneNote() {
     const sectionId = document.getElementById('section-select').value;
     if (!sectionId || !selectedFile) return;
+
     const btn = document.getElementById('push-btn');
     const status = document.getElementById('status');
     btn.disabled = true;
-    status.className = 'status loading show';
-    status.innerHTML = '<span class="spinner"></span> Pushing to OneNote...';
+
     try {
-      const html = await selectedFile.text();
-      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      // Step 1: Render HTML to image
+      status.className = 'status loading show';
+      status.innerHTML = '<span class="spinner"></span> Rendering HTML to image...';
+
+      const htmlContent = await selectedFile.text();
+      const titleMatch = htmlContent.match(/<title[^>]*>([^<]+)<\/title>/i);
       const pageTitle = titleMatch ? titleMatch[1].trim() : selectedFile.name.replace(/\.html?$/i, '');
-      const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-      const bodyContent = bodyMatch ? bodyMatch[1] : html;
-      const oneNoteHtml = `<!DOCTYPE html><html><head><title>${pageTitle}</title><meta name="created" content="${new Date().toISOString()}"/></head><body>${bodyContent}</body></html>`;
+
+      const imageBlob = await renderHtmlToImage(htmlContent);
+
+      // Step 2: Upload image to OneNote as a page
+      status.innerHTML = '<span class="spinner"></span> Uploading to OneNote...';
+
+      // Convert blob to base64
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(imageBlob);
+      });
+
+      // Build OneNote page with embedded image
+      const oneNoteHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>${pageTitle}</title>
+  <meta name="created" content="${new Date().toISOString()}"/>
+</head>
+<body>
+  <img src="name:image" alt="${pageTitle}" style="width:100%;"/>
+</body>
+</html>`;
+
+      // Multipart form data — page HTML + image binary
+      const boundary = 'onenote_boundary_' + Date.now();
+      const encoder = new TextEncoder();
+
+      const part1 = `--${boundary}\r\nContent-Disposition: form-data; name="Presentation"\r\nContent-Type: application/xhtml+xml\r\n\r\n${oneNoteHtml}\r\n`;
+      const part2header = `--${boundary}\r\nContent-Disposition: form-data; name="image"\r\nContent-Type: image/png\r\n\r\n`;
+      const part2footer = `\r\n--${boundary}--\r\n`;
+
+      // Combine into single ArrayBuffer
+      const p1 = encoder.encode(part1);
+      const p2h = encoder.encode(part2header);
+      const p2f = encoder.encode(part2footer);
+      const imageArray = new Uint8Array(await imageBlob.arrayBuffer());
+
+      const body = new Uint8Array(p1.length + p2h.length + imageArray.length + p2f.length);
+      let offset = 0;
+      body.set(p1, offset); offset += p1.length;
+      body.set(p2h, offset); offset += p2h.length;
+      body.set(imageArray, offset); offset += imageArray.length;
+      body.set(p2f, offset);
+
       const res = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/sections/${sectionId}/pages`, {
         method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/xhtml+xml' },
-        body: oneNoteHtml
+        headers: {
+          'Authorization': 'Bearer ' + accessToken,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`
+        },
+        body: body
       });
+
       if (res.ok) {
         status.className = 'status success show';
-        status.innerHTML = `✅ "<strong>${pageTitle}</strong>" created in OneNote!`;
+        status.innerHTML = `✅ "<strong>${pageTitle}</strong>" pushed to OneNote — ready to mark up with your pen!`;
         selectedFile = null;
         document.getElementById('file-input').value = '';
         document.querySelector('.dropzone-icon').textContent = '📄';
@@ -325,6 +418,7 @@
     }
   }
 
+  // Handle redirect return
   msalInstance.handleRedirectPromise().then(result => {
     if (result && result.account) {
       msalInstance.setActiveAccount(result.account);
