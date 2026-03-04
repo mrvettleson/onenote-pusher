@@ -212,7 +212,7 @@
   }
 
   function signOut() {
-    msalInstance.logoutPopup().then(() => location.reload());
+    msalInstance.logoutRedirect();
   }
 
   async function loadNotebooks() {
