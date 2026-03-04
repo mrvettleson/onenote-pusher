@@ -294,7 +294,7 @@
 
       // Write HTML into iframe
       iframe.style.visibility = 'hidden';
-      iframe.style.width = '1200px';
+      iframe.style.width = window.screen.width + 'px';
       iframe.contentDocument.open();
       iframe.contentDocument.write(htmlContent);
       iframe.contentDocument.close();
@@ -308,13 +308,13 @@
           iframe.style.height = fullHeight + 'px';
 
           const canvas = await html2canvas(iframe.contentDocument.body, {
-            width: 1200,
+            width: window.screen.width,
             height: fullHeight,
             scale: 1.5, // higher res for crisp pen markup
             useCORS: true,
             allowTaint: true,
             backgroundColor: '#ffffff',
-            windowWidth: 1200,
+            windowWidth: window.screen.width,
             windowHeight: fullHeight
           });
 
@@ -364,7 +364,7 @@
   <meta name="created" content="${new Date().toISOString()}"/>
 </head>
 <body>
-  <img src="name:image" alt="${pageTitle}" style="width:100%;"/>
+  <img src="name:image" alt="${pageTitle}" style="width:100%; max-width:100%;"/>
 </body>
 </html>`;
 
